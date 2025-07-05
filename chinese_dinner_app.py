@@ -23,7 +23,8 @@ def init_google_sheets():
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = Credentials.from_service_account_info(
             creds_dict,
-            scopes=['https://www.googleapis.com/auth/spreadsheets']
+            scopes=['https://www.googleapis.com/auth/spreadsheets', 
+                    'https://www.googleapis.com/auth/drive']
         )
         client = gspread.authorize(creds)
         
