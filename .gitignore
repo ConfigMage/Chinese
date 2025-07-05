@@ -152,3 +152,7 @@ Thumbs.db
 config.local.py
 secrets.toml
 .streamlit/secrets.toml
+
+# Google Service Account credentials
+*.json
+chinese-465019-*.json

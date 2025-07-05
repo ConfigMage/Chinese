@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import time
+import gspread
+from google.oauth2.service_account import Credentials
+import json
 
 # Configure page
 st.set_page_config(
@@ -10,6 +13,43 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Google Sheets Configuration
+@st.cache_resource
+def init_google_sheets():
+    """Initialize Google Sheets connection"""
+    try:
+        # Try to get credentials from Streamlit secrets
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=['https://www.googleapis.com/auth/spreadsheets']
+        )
+        client = gspread.authorize(creds)
+        
+        # Open or create spreadsheet
+        try:
+            sheet = client.open("Chinese Dinner Votes")
+        except gspread.SpreadsheetNotFound:
+            sheet = client.create("Chinese Dinner Votes")
+            # Share with anyone with the link
+            sheet.share("", perm_type='anyone', role='reader')
+        
+        # Get or create worksheet
+        try:
+            worksheet = sheet.worksheet("votes")
+        except gspread.WorksheetNotFound:
+            worksheet = sheet.add_worksheet(title="votes", rows=1000, cols=10)
+            # Add headers
+            worksheet.update('A1:E1', [['guest', 'food_item', 'food_display', 'preference', 'timestamp']])
+        
+        return worksheet
+    except Exception as e:
+        st.warning(f"Google Sheets not configured. Data will be stored locally only. Error: {e}")
+        return None
+
+# Initialize Google Sheets
+worksheet = init_google_sheets()
 
 # Custom CSS for better styling
 st.markdown("""
@@ -66,6 +106,93 @@ if 'votes' not in st.session_state:
 if 'admin_authenticated' not in st.session_state:
     st.session_state.admin_authenticated = False
 
+# Google Sheets Functions
+def load_votes_from_sheet():
+    """Load all votes from Google Sheets"""
+    if worksheet is None:
+        return st.session_state.votes
+    
+    try:
+        # Get all values from sheet
+        all_values = worksheet.get_all_values()
+        if len(all_values) <= 1:  # Only headers or empty
+            return []
+        
+        # Convert to list of dicts
+        headers = all_values[0]
+        votes = []
+        for row in all_values[1:]:
+            if row[0]:  # Check if row has data
+                vote = {
+                    'guest': row[0],
+                    'food_item': row[1],
+                    'food_display': row[2],
+                    'preference': row[3],
+                    'timestamp': row[4]
+                }
+                votes.append(vote)
+        return votes
+    except Exception as e:
+        st.error(f"Error loading votes: {e}")
+        return st.session_state.votes
+
+def save_vote_to_sheet(vote):
+    """Save a single vote to Google Sheets"""
+    if worksheet is None:
+        return
+    
+    try:
+        # Append the vote as a new row
+        worksheet.append_row([
+            vote['guest'],
+            vote['food_item'],
+            vote['food_display'],
+            vote['preference'],
+            vote['timestamp']
+        ])
+    except Exception as e:
+        st.error(f"Error saving vote: {e}")
+
+def clear_guest_votes_from_sheet(guest_name):
+    """Remove all votes from a specific guest"""
+    if worksheet is None:
+        return
+    
+    try:
+        # Get all values
+        all_values = worksheet.get_all_values()
+        if len(all_values) <= 1:
+            return
+        
+        # Find rows to keep (headers + non-matching guests)
+        rows_to_keep = [all_values[0]]  # Keep headers
+        for i, row in enumerate(all_values[1:], start=2):
+            if row[0] != guest_name:
+                rows_to_keep.append(row)
+        
+        # Clear sheet and rewrite
+        worksheet.clear()
+        if rows_to_keep:
+            worksheet.update(f'A1:E{len(rows_to_keep)}', rows_to_keep)
+    except Exception as e:
+        st.error(f"Error clearing votes: {e}")
+
+def clear_all_votes_from_sheet():
+    """Clear all votes from Google Sheets"""
+    if worksheet is None:
+        return
+    
+    try:
+        # Clear everything except headers
+        worksheet.resize(rows=1)
+        worksheet.resize(rows=1000)
+    except Exception as e:
+        st.error(f"Error clearing all votes: {e}")
+
+# Load votes on startup
+if worksheet is not None:
+    st.session_state.votes = load_votes_from_sheet()
+
 # Guest names and food options with emojis
 GUESTS = [
     "Marj",
@@ -100,8 +227,9 @@ PREFERENCE_OPTIONS = [
 
 def submit_vote(guest_name, preferences):
     """Submit a vote and handle duplicates"""
-    # Remove any existing votes from this guest
+    # Remove any existing votes from this guest (both locally and in sheet)
     st.session_state.votes = [vote for vote in st.session_state.votes if vote['guest'] != guest_name]
+    clear_guest_votes_from_sheet(guest_name)
     
     # Add new votes
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -115,6 +243,7 @@ def submit_vote(guest_name, preferences):
             'timestamp': timestamp
         }
         st.session_state.votes.append(vote)
+        save_vote_to_sheet(vote)
 
 def get_guest_previous_votes(guest_name):
     """Get previous votes for a guest"""
@@ -169,8 +298,12 @@ page = st.sidebar.selectbox(
     ["🗳️ Cast Your Vote", "📊 View Results", "⚙️ Admin Panel"]
 )
 
-# Show current vote count in sidebar
-vote_count = len(set(vote['guest'] for vote in st.session_state.votes))
+# Always load fresh data for vote count
+if worksheet is not None:
+    current_votes = load_votes_from_sheet()
+    vote_count = len(set(vote['guest'] for vote in current_votes))
+else:
+    vote_count = len(set(vote['guest'] for vote in st.session_state.votes))
 st.sidebar.markdown(f"""
 <div class="stats-card">
     <h3>📈 Current Status</h3>
@@ -262,6 +395,10 @@ if page == "🗳️ Cast Your Vote":
 
 elif page == "📊 View Results":
     st.header("📊 Voting Results")
+    
+    # Always load fresh data from Google Sheets
+    if worksheet is not None:
+        st.session_state.votes = load_votes_from_sheet()
     
     if not st.session_state.votes:
         st.warning("📭 No votes have been cast yet!")
@@ -356,6 +493,7 @@ elif page == "⚙️ Admin Panel":
             if st.button("🗑️ Reset All Votes", type="secondary"):
                 if st.button("⚠️ Confirm Reset", type="primary"):
                     st.session_state.votes = []
+                    clear_all_votes_from_sheet()
                     st.success("All votes have been reset!")
                     st.rerun()
         
@@ -389,6 +527,7 @@ elif page == "⚙️ Admin Panel":
                     'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
                 st.session_state.votes.append(vote)
+                save_vote_to_sheet(vote)
                 st.success(f"Added vote for {manual_guest}")
                 st.rerun()
         
